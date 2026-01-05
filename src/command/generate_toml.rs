@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
 use clap::Args;
 use rayon::prelude::*;
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::error::{ColmenaError, ColmenaResult};
@@ -47,6 +48,10 @@ pub struct Opts {
     /// Show what would be generated without writing
     #[arg(long)]
     dry_run: bool,
+
+    /// Continue even if some nodes fail to evaluate
+    #[arg(long)]
+    keep_going: bool,
 }
 
 /// Result of evaluating a single node
@@ -79,25 +84,56 @@ pub async fn run(flake: Flake, opts: Opts) -> ColmenaResult<()> {
     }
 
     // Filter nodes if requested
-    let filtered_nodes = if let Some(_filter) = &opts.on {
-        filter_nodes(&node_names)?
+    let filtered_nodes = if let Some(filter) = &opts.on {
+        filter_nodes(&node_names, filter)?
     } else {
         node_names.clone()
     };
 
-    println!(
-        "  ├─ Found {} nixosConfigurations: {}",
-        node_names.len(),
-        node_names.join(", ")
-    );
+    // Show count and first few nodes
+    if node_names.len() <= 10 {
+        println!(
+            "  ├─ Found {} nixosConfigurations: {}",
+            node_names.len(),
+            node_names.join(", ")
+        );
+    } else {
+        let preview: Vec<_> = node_names.iter().take(5).cloned().collect();
+        println!(
+            "  ├─ Found {} nixosConfigurations: {}, ... ({} more)",
+            node_names.len(),
+            preview.join(", "),
+            node_names.len() - 5
+        );
+    }
 
     if filtered_nodes.len() < node_names.len() {
-        println!("  └─ Filtered to {} nodes", filtered_nodes.len());
+        if filtered_nodes.len() <= 10 {
+            println!(
+                "  └─ Filtered to {} nodes: {}",
+                filtered_nodes.len(),
+                filtered_nodes.join(", ")
+            );
+        } else {
+            let preview: Vec<_> = filtered_nodes.iter().take(5).cloned().collect();
+            println!(
+                "  └─ Filtered to {} nodes: {}, ... ({} more)",
+                filtered_nodes.len(),
+                preview.join(", "),
+                filtered_nodes.len() - 5
+            );
+        }
     }
 
     // Step 2: Evaluate configurations in parallel
     println!("[2/4] Evaluating configurations...");
-    let eval_results = evaluate_nodes_parallel(&flake, &filtered_nodes, opts.parallel, opts.build)?;
+    let eval_results = evaluate_nodes_parallel(
+        &flake,
+        &filtered_nodes,
+        opts.parallel,
+        opts.build,
+        opts.keep_going,
+    )?;
 
     for result in &eval_results {
         println!("  ├─ {}: {}s", result.node_name, result.duration_secs);
@@ -150,52 +186,65 @@ pub async fn run(flake: Flake, opts: Opts) -> ColmenaResult<()> {
 
 /// Discover NixOS configurations in the flake
 async fn discover_configurations(flake: &Flake) -> ColmenaResult<Vec<String>> {
+    // Use nix eval to get attribute names without evaluating the configurations
+    // Query the nixosConfigurations attribute directly
+    let flake_attr = format!("{}#nixosConfigurations", flake.uri());
+
     let output = Command::new("nix")
-        .args(["flake", "show", "--json", flake.uri()])
+        .args([
+            "eval",
+            "--json",
+            "--apply",
+            "configs: builtins.attrNames configs",
+            &flake_attr,
+        ])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(ColmenaError::Unknown {
-            message: format!("Failed to show flake metadata:\n{}", stderr),
+            message: format!("Failed to discover nixosConfigurations:\n{}", stderr),
         });
     }
 
-    let json: JsonValue =
+    let mut configs: Vec<String> =
         serde_json::from_slice(&output.stdout).map_err(|e| ColmenaError::Unknown {
-            message: format!("Failed to parse flake metadata JSON: {}", e),
+            message: format!("Failed to parse configuration names: {}", e),
         })?;
-
-    let mut configs = Vec::new();
-
-    // Check for nixosConfigurations
-    if let Some(nixos_configs) = json.pointer("/nixosConfigurations") {
-        if let Some(obj) = nixos_configs.as_object() {
-            for key in obj.keys() {
-                configs.push(key.clone());
-            }
-        }
-    }
-
-    // Check for colmena output
-    if let Some(colmena_output) = json.pointer("/colmena") {
-        if let Some(obj) = colmena_output.as_object() {
-            for key in obj.keys() {
-                if !configs.contains(key) {
-                    configs.push(key.clone());
-                }
-            }
-        }
-    }
 
     configs.sort();
     Ok(configs)
 }
 
 /// Filter nodes based on node filter
-fn filter_nodes(all_nodes: &[String]) -> ColmenaResult<Vec<String>> {
-    // For now, simple implementation - can be enhanced later
-    Ok(all_nodes.to_vec())
+fn filter_nodes(all_nodes: &[String], filter: &NodeFilter) -> ColmenaResult<Vec<String>> {
+    use crate::nix::NodeName;
+
+    // Convert strings to NodeNames
+    let node_names: Vec<NodeName> = all_nodes
+        .iter()
+        .filter_map(|name| NodeName::new(name.clone()).ok())
+        .collect();
+
+    // Use existing filter logic
+    let filtered_set = filter.filter_node_names(&node_names)?;
+
+    if filtered_set.is_empty() {
+        return Err(ColmenaError::Unknown {
+            message: format!(
+                "No nodes matched the filter. Available nodes: {}",
+                all_nodes.join(", ")
+            ),
+        });
+    }
+
+    // Convert back to strings
+    let filtered: Vec<String> = filtered_set
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect();
+
+    Ok(filtered)
 }
 
 /// Evaluate multiple nodes in parallel
@@ -204,6 +253,7 @@ fn evaluate_nodes_parallel(
     nodes: &[String],
     parallel: usize,
     build: bool,
+    keep_going: bool,
 ) -> ColmenaResult<Vec<EvaluationResult>> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallel)
@@ -212,12 +262,54 @@ fn evaluate_nodes_parallel(
             message: format!("Failed to create thread pool: {}", e),
         })?;
 
-    pool.install(|| {
+    let total = nodes.len();
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let results: Vec<_> = pool.install(|| {
         nodes
             .par_iter()
-            .map(|node_name| evaluate_single_node(flake, node_name, build))
+            .map(|node_name| {
+                let result = evaluate_single_node(flake, node_name, build);
+                let count = completed.fetch_add(1, Ordering::SeqCst) + 1;
+
+                match &result {
+                    Ok(_) => {
+                        println!("  ├─ [{}/{}] {}: ✓", count, total, node_name);
+                    }
+                    Err(e) => {
+                        println!("  ├─ [{}/{}] {}: ✗ ({})", count, total, node_name, e);
+                    }
+                }
+
+                (node_name.clone(), result)
+            })
+            .collect()
+    });
+
+    if keep_going {
+        // Filter out failures and continue
+        let successes: Vec<_> = results
+            .into_iter()
+            .filter_map(|(_name, result)| result.ok())
+            .collect();
+
+        let failed_count = total - successes.len();
+        if failed_count > 0 {
+            println!(
+                "  └─ ⚠️  {} node(s) failed, continuing with {} successful nodes",
+                failed_count,
+                successes.len()
+            );
+        }
+
+        Ok(successes)
+    } else {
+        // Stop on first error
+        results
+            .into_iter()
+            .map(|(_, result)| result)
             .collect::<ColmenaResult<Vec<_>>>()
-    })
+    }
 }
 
 /// Evaluate a single node to get its derivation path
@@ -325,20 +417,15 @@ fn validate_drv_path(path: &str) -> ColmenaResult<()> {
 
 /// Check if the flake has a colmena output
 async fn check_colmena_output(flake: &Flake) -> ColmenaResult<bool> {
+    // Try to evaluate the colmena attribute to see if it exists
+    let flake_attr = format!("{}#colmena", flake.uri());
+
     let output = Command::new("nix")
-        .args(["flake", "show", "--json", flake.uri()])
+        .args(["eval", "--apply", "x: true", &flake_attr])
         .output()?;
 
-    if !output.status.success() {
-        return Ok(false);
-    }
-
-    let json: JsonValue =
-        serde_json::from_slice(&output.stdout).map_err(|e| ColmenaError::Unknown {
-            message: format!("Failed to parse flake metadata JSON: {}", e),
-        })?;
-
-    Ok(json.pointer("/colmena").is_some())
+    // If the command succeeds, colmena output exists
+    Ok(output.status.success())
 }
 
 /// Extract deployment metadata for a node from colmena output
