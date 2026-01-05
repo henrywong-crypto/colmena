@@ -194,6 +194,14 @@ impl Hive {
         self.context_dir.as_ref().map(|p| p.as_ref())
     }
 
+    /// Get the flake if this is a flake-based hive
+    pub fn as_flake(&self) -> Option<&Flake> {
+        match &self.path {
+            HivePath::Flake(flake) => Some(flake),
+            HivePath::Legacy(_) => None,
+        }
+    }
+
     pub async fn get_meta_config(&self) -> ColmenaResult<&MetaConfig> {
         self.meta_config
             .get_or_try_init(|| async {
@@ -486,7 +494,7 @@ impl Hive {
         matches!(self.path(), HivePath::Flake(_))
     }
 
-    fn nix_instantiate(&self, expression: &str) -> NixInstantiate {
+    fn nix_instantiate(&self, expression: &str) -> NixInstantiate<'_> {
         NixInstantiate::new(self, expression.to_owned())
     }
 

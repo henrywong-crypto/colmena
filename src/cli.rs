@@ -200,6 +200,13 @@ enum Command {
 
     Exec(command::exec::Opts),
 
+    /// Generate TOML lock file from Nix flake evaluations
+    ///
+    /// This command evaluates all NixOS configurations in the flake and generates
+    /// a hive-lock.toml file containing cached derivation paths. This enables fast
+    /// deployments by avoiding repeated Nix evaluations.
+    GenerateToml(command::generate_toml::Opts),
+
     /// Start an interactive REPL with the complete configuration
     ///
     /// In the REPL, you can inspect the configuration interactively with tab
@@ -334,6 +341,23 @@ pub async fn run() {
         Command::ApplyLocal(args) => r(command::apply_local::run(hive, args), opts.config).await,
         Command::Eval(args) => r(command::eval::run(hive, args), opts.config).await,
         Command::Exec(args) => r(command::exec::run(hive, args), opts.config).await,
+        Command::GenerateToml(args) => {
+            // generate-toml requires a flake
+            match hive.as_flake() {
+                Some(flake) => {
+                    r(
+                        command::generate_toml::run(flake.clone(), args),
+                        opts.config,
+                    )
+                    .await
+                }
+                None => {
+                    eprintln!("Error: generate-toml requires a flake-based configuration");
+                    eprintln!("Hint: Use a flake.nix instead of hive.nix");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::NixInfo => r(command::nix_info::run(), opts.config).await,
         Command::Repl => r(command::repl::run(hive), opts.config).await,
         #[cfg(debug_assertions)]

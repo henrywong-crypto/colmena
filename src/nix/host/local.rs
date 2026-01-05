@@ -146,10 +146,6 @@ impl Host for Local {
 }
 
 impl Local {
-    pub fn set_privilege_escalation_command(&mut self, command: Option<Vec<String>>) {
-        self.privilege_escalation_command = command;
-    }
-
     pub fn upcast(self) -> Box<dyn Host> {
         Box::new(self)
     }

@@ -42,6 +42,9 @@ pub mod evaluator;
 pub mod expression;
 pub use expression::{NixExpression, SerializedNixExpression};
 
+pub mod toml_lock;
+pub use toml_lock::{TomlDeployment, TomlLockFile, TomlNode};
+
 /// Path to the main system profile.
 pub const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
 
@@ -167,10 +170,6 @@ impl NodeConfig {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn allows_local_deployment(&self) -> bool {
         self.allow_local_deployment
-    }
-
-    pub fn privilege_escalation_command(&self) -> &Vec<String> {
-        &self.privilege_escalation_command
     }
 
     pub fn build_on_target(&self) -> bool {

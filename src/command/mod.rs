@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod eval;
 pub mod exec;
+pub mod generate_toml;
 pub mod nix_info;
 pub mod repl;
 
