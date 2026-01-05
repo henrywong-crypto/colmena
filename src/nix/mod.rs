@@ -172,6 +172,10 @@ impl NodeConfig {
         self.allow_local_deployment
     }
 
+    pub fn privilege_escalation_command(&self) -> &Vec<String> {
+        &self.privilege_escalation_command
+    }
+
     pub fn build_on_target(&self) -> bool {
         self.build_on_target
     }
