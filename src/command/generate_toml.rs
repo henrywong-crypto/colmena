@@ -131,11 +131,6 @@ pub async fn run(flake: Flake, opts: Opts) -> ColmenaResult<()> {
         opts.keep_going,
     )?;
 
-    for result in &eval_results {
-        println!("  ├─ {}: {}s", result.node_name, result.duration_secs);
-        println!("      └─ {}", result.drv_path);
-    }
-
     // Step 3: Extract deployment metadata (if colmena output exists)
     println!("[3/4] Extracting deployment metadata...");
     let has_colmena = check_colmena_output(&flake).await?;
@@ -269,8 +264,15 @@ fn evaluate_nodes_parallel(
                 let count = completed.fetch_add(1, Ordering::SeqCst) + 1;
 
                 match &result {
-                    Ok(_) => {
-                        println!("  ├─ [{}/{}] {}: ✓", count, total, node_name);
+                    Ok(eval_result) => {
+                        println!(
+                            "  ├─ [{}/{}] {}: ✓ ({}s) → {}",
+                            count,
+                            total,
+                            node_name,
+                            eval_result.duration_secs,
+                            eval_result.drv_path
+                        );
                     }
                     Err(e) => {
                         println!("  ├─ [{}/{}] {}: ✗ ({})", count, total, node_name, e);

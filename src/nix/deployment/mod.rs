@@ -10,6 +10,9 @@ pub use limits::{EvaluationNodeLimit, ParallelismLimit};
 pub mod options;
 pub use options::{EvaluatorType, Options};
 
+pub mod lock_file;
+pub use lock_file::load_lock_file;
+
 use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
@@ -411,6 +414,14 @@ impl Deployment {
         parent: JobHandle,
         nodes: Vec<NodeName>,
     ) -> ColmenaResult<HashMap<NodeName, ProfileDerivation>> {
+        // Try to load from lock file first
+        let lock_file_path = std::path::Path::new("hive-lock.toml");
+        if let Some(cached_drvs) = load_lock_file(lock_file_path, &nodes)? {
+            tracing::info!("Using cached derivations from hive-lock.toml");
+            return Ok(cached_drvs);
+        }
+
+        // Fall back to Nix evaluation
         let job = parent.create_job(JobType::Evaluate, nodes.clone())?;
 
         job.run_waiting(|job| async move {

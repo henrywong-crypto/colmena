@@ -109,7 +109,7 @@ impl<T: TryFrom<BuildResult<T>>> StoreDerivation<T> {
         &self.path
     }
 
-    fn from_store_path_unchecked(path: StorePath) -> Self {
+    pub fn from_store_path_unchecked(path: StorePath) -> Self {
         Self {
             path,
             _target: PhantomData,
