@@ -8,15 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
 use clap::Args;
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 
 use crate::error::{ColmenaError, ColmenaResult};
 use crate::nix::{Flake, NodeFilter, TomlDeployment, TomlLockFile, TomlNode};
-
-const COLMENA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Generate TOML lock file from Nix flake evaluations
 #[derive(Debug, Args)]
@@ -440,22 +436,10 @@ async fn build_lock_file(
     eval_results: Vec<EvaluationResult>,
     deployments: HashMap<String, TomlDeployment>,
 ) -> ColmenaResult<TomlLockFile> {
-    let flake_lock_hash = hash_flake_lock()?;
-    let generated_at = Utc::now().to_rfc3339();
-
-    let mut lock_file = TomlLockFile::new(
-        "flake.nix".to_string(),
-        generated_at,
-        flake_lock_hash,
-        COLMENA_VERSION.to_string(),
-    );
+    let mut lock_file = TomlLockFile::new();
 
     for result in eval_results {
-        let mut node = TomlNode::new(
-            result.drv_path,
-            format!("nixosConfigurations.{}", result.node_name),
-        );
-
+        let mut node = TomlNode::new(result.drv_path);
         node.system_config = result.system_path;
         node.deployment = deployments.get(&result.node_name).cloned();
 
@@ -466,24 +450,6 @@ async fn build_lock_file(
 }
 
 /// Hash the flake.lock file
-fn hash_flake_lock() -> ColmenaResult<String> {
-    let flake_lock_path = Path::new("flake.lock");
-
-    if !flake_lock_path.exists() {
-        return Err(ColmenaError::Unknown {
-            message: "flake.lock not found in current directory".to_string(),
-        });
-    }
-
-    let contents = fs::read(flake_lock_path)?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&contents);
-    let hash = hasher.finalize();
-
-    Ok(format!("sha256:{:x}", hash))
-}
-
 /// Merge generated lock file with template
 fn merge_with_template(
     mut generated: TomlLockFile,
@@ -495,16 +461,6 @@ fn merge_with_template(
         toml::from_str(&template_content).map_err(|e| ColmenaError::Unknown {
             message: format!("Failed to parse template TOML: {}", e),
         })?;
-
-    // Merge metadata (prefer template for allow_apply_all)
-    if let Some(allow_apply_all) = template.meta.allow_apply_all {
-        generated.meta.allow_apply_all = Some(allow_apply_all);
-    }
-
-    // Merge defaults
-    if template.defaults.is_some() {
-        generated.defaults = template.defaults;
-    }
 
     // Merge node deployment configs
     for (node_name, template_node) in template.nodes {
